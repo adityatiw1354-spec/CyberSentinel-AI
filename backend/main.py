@@ -12,9 +12,11 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, Header, status as http_status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from jose import jwt, JWTError
+from passlib.context import CryptContext
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(BASE_DIR, ".env")
@@ -34,6 +36,59 @@ def get_db_connection():
     return connection
 
 
+# =========================================================
+# AUTHENTICATION
+# =========================================================
+
+def init_users_db():
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+)
+
+JWT_ALGORITHM = "HS256"
+JWT_SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY",
+    "cybersentinel-development-secret-change-me",
+)
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return pwd_context.verify(password, password_hash)
+
+
+def create_access_token(user_id: int) -> str:
+    payload = {
+        "sub": str(user_id),
+        "iat": int(time.time()),
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
 def init_scan_history_db():
     with get_db_connection() as connection:
         connection.execute(
@@ -47,20 +102,34 @@ def init_scan_history_db():
                 risk_level TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 indicators TEXT NOT NULL,
-                scanned_at TEXT NOT NULL
+                scanned_at TEXT NOT NULL,
+                user_id INTEGER
             )
             """
         )
+
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(scan_history)"
+            ).fetchall()
+        }
+
+        if "user_id" not in columns:
+            connection.execute(
+                "ALTER TABLE scan_history ADD COLUMN user_id INTEGER"
+            )
+
         connection.commit()
 
 
-def save_scan_history(scan_result):
+def save_scan_history(scan_result, user_id: int):
     with get_db_connection() as connection:
         connection.execute(
             """
             INSERT INTO scan_history
-            (url, domain, score, status, risk_level, summary, indicators, scanned_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (url, domain, score, status, risk_level, summary, indicators, scanned_at, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 scan_result["url"],
@@ -71,22 +140,24 @@ def save_scan_history(scan_result):
                 scan_result["summary"],
                 json.dumps(scan_result["indicators"]),
                 scan_result["scanned_at"],
+                user_id,
             ),
         )
         connection.commit()
 
 
-def get_scan_history(limit=20):
+def get_scan_history(user_id: int, limit=20):
     with get_db_connection() as connection:
         rows = connection.execute(
             """
             SELECT id, url, domain, score, status, risk_level,
                    summary, indicators, scanned_at
             FROM scan_history
+            WHERE user_id = ?
             ORDER BY id DESC
             LIMIT ?
             """,
-            (limit,),
+            (user_id, limit),
         ).fetchall()
 
     history = []
@@ -106,12 +177,16 @@ def get_scan_history(limit=20):
     return history
 
 
-def clear_scan_history():
+def clear_scan_history(user_id: int):
     with get_db_connection() as connection:
-        connection.execute("DELETE FROM scan_history")
+        connection.execute(
+            "DELETE FROM scan_history WHERE user_id = ?",
+            (user_id,),
+        )
         connection.commit()
 
 
+init_users_db()
 init_scan_history_db()
 
 
@@ -150,6 +225,189 @@ class PasswordAnalyzeRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+# =========================================================
+# AUTH HELPERS
+# =========================================================
+
+def get_current_user_id_from_token(
+    authorization: str | None = None,
+) -> int:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+
+    token = authorization.split(" ", 1)[1].strip()
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+        subject = payload.get("sub")
+
+        if not subject:
+            raise ValueError("Missing user id")
+
+        user_id = int(subject)
+    except (JWTError, ValueError, TypeError):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token.",
+        )
+
+    with get_db_connection() as connection:
+        user = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if not user:
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="User account not found.",
+        )
+
+    return user_id
+
+
+# =========================================================
+# AUTHENTICATION API
+# =========================================================
+
+@app.post("/api/auth/register")
+def register(request: RegisterRequest):
+    name = request.name.strip()
+    email = request.email.strip().lower()
+    password = request.password
+
+    if len(name) < 2:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Name must be at least 2 characters.",
+        )
+
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Please enter a valid email address.",
+        )
+
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters.",
+        )
+
+    with get_db_connection() as connection:
+        existing = connection.execute(
+            "SELECT id FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+
+        if existing:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="An account with this email already exists.",
+            )
+
+        cursor = connection.execute(
+            """
+            INSERT INTO users (name, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                name,
+                email,
+                hash_password(password),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        connection.commit()
+        user_id = cursor.lastrowid
+
+    token = create_access_token(user_id)
+
+    return {
+        "success": True,
+        "message": "Account created successfully.",
+        "token": token,
+        "user": {
+            "id": user_id,
+            "name": name,
+            "email": email,
+        },
+    }
+
+
+@app.post("/api/auth/login")
+def login(request: LoginRequest):
+    email = request.email.strip().lower()
+
+    with get_db_connection() as connection:
+        user = connection.execute(
+            """
+            SELECT id, name, email, password_hash, created_at
+            FROM users
+            WHERE email = ?
+            """,
+            (email,),
+        ).fetchone()
+
+    if not user or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+        )
+
+    token = create_access_token(user["id"])
+
+    return {
+        "success": True,
+        "message": "Login successful.",
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "created_at": user["created_at"],
+        },
+    }
+
+
+@app.get("/api/auth/me")
+def me(authorization: str | None = Header(default=None)):
+    user_id = get_current_user_id_from_token(authorization)
+
+    with get_db_connection() as connection:
+        user = connection.execute(
+            """
+            SELECT id, name, email, created_at
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+    return {
+        "success": True,
+        "user": dict(user),
+    }
+
+
 # =========================================================
 # ROOT
 # =========================================================
@@ -184,34 +442,42 @@ def health():
 # =========================================================
 
 @app.get("/api/scan/history")
-def scan_history():
+def scan_history(authorization: str | None = Header(default=None)):
+    user_id = get_current_user_id_from_token(authorization)
     return {
         "success": True,
-        "history": get_scan_history(20),
+        "history": get_scan_history(user_id, 20),
     }
 
 
 @app.get("/api/scan/stats")
-def scan_stats():
+def scan_stats(authorization: str | None = Header(default=None)):
+    user_id = get_current_user_id_from_token(authorization)
+
     with get_db_connection() as connection:
         total = connection.execute(
-            "SELECT COUNT(*) AS count FROM scan_history"
+            "SELECT COUNT(*) AS count FROM scan_history WHERE user_id = ?",
+            (user_id,),
         ).fetchone()["count"]
 
         safe = connection.execute(
-            "SELECT COUNT(*) AS count FROM scan_history WHERE status = 'safe'"
+            "SELECT COUNT(*) AS count FROM scan_history WHERE user_id = ? AND status = 'safe'",
+            (user_id,),
         ).fetchone()["count"]
 
         suspicious = connection.execute(
-            "SELECT COUNT(*) AS count FROM scan_history WHERE status = 'suspicious'"
+            "SELECT COUNT(*) AS count FROM scan_history WHERE user_id = ? AND status = 'suspicious'",
+            (user_id,),
         ).fetchone()["count"]
 
         threat = connection.execute(
-            "SELECT COUNT(*) AS count FROM scan_history WHERE status = 'threat'"
+            "SELECT COUNT(*) AS count FROM scan_history WHERE user_id = ? AND status = 'threat'",
+            (user_id,),
         ).fetchone()["count"]
 
         average_score = connection.execute(
-            "SELECT COALESCE(AVG(score), 0) AS average FROM scan_history"
+            "SELECT COALESCE(AVG(score), 0) AS average FROM scan_history WHERE user_id = ?",
+            (user_id,),
         ).fetchone()["average"]
 
     return {
@@ -227,8 +493,9 @@ def scan_stats():
 
 
 @app.delete("/api/scan/history")
-def delete_scan_history():
-    clear_scan_history()
+def delete_scan_history(authorization: str | None = Header(default=None)):
+    user_id = get_current_user_id_from_token(authorization)
+    clear_scan_history(user_id)
     return {
         "success": True,
         "message": "Scan history cleared.",
@@ -580,7 +847,11 @@ def check_virustotal(url: str):
 
 
 @app.post("/api/scan/url")
-def scan_url(request: URLScanRequest):
+def scan_url(
+    request: URLScanRequest,
+    authorization: str | None = Header(default=None),
+):
+    user_id = get_current_user_id_from_token(authorization)
 
     raw_url = request.url.strip()
 
@@ -1158,7 +1429,7 @@ def scan_url(request: URLScanRequest):
         "scanned_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    save_scan_history(scan_result)
+    save_scan_history(scan_result, user_id)
 
     return scan_result
 
@@ -1659,7 +1930,11 @@ class SecurityReportRequest(BaseModel):
 
 
 @app.post("/api/report/pdf")
-def generate_security_report(request: SecurityReportRequest):
+def generate_security_report(
+    request: SecurityReportRequest,
+    authorization: str | None = Header(default=None),
+):
+    get_current_user_id_from_token(authorization)
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_CENTER
@@ -1808,16 +2083,18 @@ def generate_security_report(request: SecurityReportRequest):
 # =========================================================
 
 @app.get("/api/scan/history")
-def scan_history():
+def scan_history(authorization: str | None = Header(default=None)):
+    user_id = get_current_user_id_from_token(authorization)
     return {
         "success": True,
-        "history": get_scan_history(20),
+        "history": get_scan_history(user_id, 20),
     }
 
 
 @app.delete("/api/scan/history")
-def delete_scan_history():
-    clear_scan_history()
+def delete_scan_history(authorization: str | None = Header(default=None)):
+    user_id = get_current_user_id_from_token(authorization)
+    clear_scan_history(user_id)
     return {
         "success": True,
         "message": "Scan history cleared.",
@@ -2169,7 +2446,11 @@ def check_virustotal(url: str):
 
 
 @app.post("/api/scan/url")
-def scan_url(request: URLScanRequest):
+def scan_url(
+    request: URLScanRequest,
+    authorization: str | None = Header(default=None),
+):
+    user_id = get_current_user_id_from_token(authorization)
 
     raw_url = request.url.strip()
 
@@ -2747,7 +3028,7 @@ def scan_url(request: URLScanRequest):
         "scanned_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    save_scan_history(scan_result)
+    save_scan_history(scan_result, user_id)
 
     return scan_result
 
