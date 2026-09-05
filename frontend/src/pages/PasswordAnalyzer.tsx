@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
+import { apiFetch } from '../lib/api'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -58,9 +59,7 @@ function PasswordAnalyzer() {
     setResult(null)
 
     try {
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/analyze/password',
-        {
+      const response = await apiFetch('/api/analyze/password', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

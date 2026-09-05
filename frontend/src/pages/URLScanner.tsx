@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { apiFetch } from '../lib/api'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -53,9 +54,7 @@ function URLScanner() {
     try {
       setHistoryError('')
 
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/scan/history',
-      )
+      const response = await apiFetch('/api/scan/history')
 
       let data: {
         success?: boolean
@@ -103,12 +102,9 @@ function URLScanner() {
     try {
       setHistoryError('')
 
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/scan/history',
-        {
-          method: 'DELETE',
-        },
-      )
+      const response = await apiFetch('/api/scan/history', {
+  method: 'DELETE',
+})
 
       let data: {
         success?: boolean
@@ -170,14 +166,9 @@ function URLScanner() {
     setResult(null)
 
     try {
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/scan/url',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
+     const response = await apiFetch('/api/scan/url', {
+  method: 'POST',
+         body: JSON.stringify({
             url: trimmedUrl,
           }),
         },
@@ -260,13 +251,8 @@ function URLScanner() {
       setReportGenerating(true)
       setError('')
 
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/report/pdf',
-        {
+      const response = await apiFetch('/api/report/pdf', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
           body: JSON.stringify({
             url,
             score: result.score,

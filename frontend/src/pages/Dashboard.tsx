@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { apiFetch } from '../lib/api'
+
 import {
   Activity,
   AlertTriangle,
@@ -50,10 +52,10 @@ function Dashboard() {
       setLoading(true)
       setError('')
 
-      const [statsResponse, historyResponse] = await Promise.all([
-        fetch(`${API_BASE}/api/scan/stats`),
-        fetch(`${API_BASE}/api/scan/history`),
-      ])
+     const [statsResponse, historyResponse] = await Promise.all([
+     apiFetch('/api/scan/stats'),
+     apiFetch('/api/scan/history'),
+     ])
 
       const statsData = await statsResponse.json()
       const historyData = await historyResponse.json()

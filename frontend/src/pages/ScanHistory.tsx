@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { apiFetch } from '../lib/api'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -56,9 +57,7 @@ function ScanHistory() {
 
       setError('')
 
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/scan/history',
-      )
+      const response = await apiFetch('/api/scan/history')
 
       let data: {
         success?: boolean
@@ -109,12 +108,9 @@ function ScanHistory() {
     try {
       setError('')
 
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/scan/history',
-        {
-          method: 'DELETE',
-        },
-      )
+      const response = await apiFetch('/api/scan/history', {
+  method: 'DELETE',
+})
 
       let data: {
         success?: boolean
@@ -195,14 +191,9 @@ function ScanHistory() {
       setReportGenerating(true)
       setError('')
 
-      const response = await fetch(
-        'http://127.0.0.1:8000/api/report/pdf',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
+     const response = await apiFetch('/api/report/pdf', {
+            method: 'POST',
+            body: JSON.stringify({
             url: scan.url,
             score: scan.score,
             status: scan.status,

@@ -1,12 +1,25 @@
-import { Bell, CircleHelp } from 'lucide-react'
+import { Bell, CircleHelp, LogOut } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { useAuth } from '../../context/AuthContext'
 
 function Topbar() {
+  const navigate = useNavigate()
+  const { user, logout } = useAuth()
+
+  const handleLogout = () => {
+    logout()
+    navigate('/login', { replace: true })
+  }
+
+  const userInitial = user?.name?.charAt(0).toUpperCase() || 'U'
+
   return (
     <header className="flex h-16 items-center justify-between border-b border-slate-800 bg-slate-950/80 px-6 backdrop-blur">
       <div>
         <p className="text-xs text-slate-500">
           Security Center
         </p>
+
         <h2 className="text-sm font-semibold text-white">
           CyberSentinel AI
         </h2>
@@ -33,17 +46,28 @@ function Topbar() {
 
         <div className="ml-2 flex items-center gap-3 border-l border-slate-800 pl-4">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-cyan-500/10 text-xs font-semibold text-cyan-400">
-            U
+            {userInitial}
           </div>
 
           <div className="hidden sm:block">
-            <p className="text-xs font-medium text-white">
-              User
+            <p className="max-w-32 truncate text-xs font-medium text-white">
+              {user?.name || 'User'}
             </p>
-            <p className="text-[10px] text-slate-500">
-              Security Account
+
+            <p className="max-w-40 truncate text-[10px] text-slate-500">
+              {user?.email || 'Security Account'}
             </p>
           </div>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            title="Logout"
+            aria-label="Logout"
+            className="ml-1 rounded-lg p-2 text-slate-400 transition hover:bg-red-500/10 hover:text-red-400"
+          >
+            <LogOut size={18} />
+          </button>
         </div>
       </div>
     </header>

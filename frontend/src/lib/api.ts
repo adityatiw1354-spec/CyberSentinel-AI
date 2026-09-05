@@ -1,21 +1,27 @@
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+import { getAuthToken } from '../context/AuthContext'
 
-export async function apiRequest<T>(
-  endpoint: string,
-  options?: RequestInit,
-): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-    ...options,
-  })
+const API_BASE_URL = 'http://127.0.0.1:8000'
 
-  if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`)
+export async function apiFetch(
+  path: string,
+  options: RequestInit = {},
+) {
+  const token = getAuthToken()
+
+  const headers = new Headers(options.headers)
+
+  if (!headers.has('Content-Type') && options.body) {
+    headers.set('Content-Type', 'application/json')
   }
 
-  return response.json()
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+
+  return fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers,
+  })
 }
+
+export { API_BASE_URL }
