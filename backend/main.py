@@ -2,17 +2,20 @@ from urllib.parse import urlparse
 from ipaddress import ip_address
 import hashlib
 import re
+import os
 
+from dotenv import load_dotenv
 import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+load_dotenv()
 
 app = FastAPI(
     title="CyberSentinel AI",
     description="AI-powered cybersecurity analysis API",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -73,6 +76,120 @@ def health():
 # URL SCANNER
 # =========================================================
 
+# =========================================================
+# GOOGLE SAFE BROWSING REPUTATION CHECK
+# =========================================================
+
+def check_url_reputation(url: str):
+    """Check a URL against Google Safe Browsing threat lists."""
+
+    api_key = os.getenv("GOOGLE_SAFE_BROWSING_API_KEY")
+
+    if not api_key:
+        return {
+            "status": "not_configured",
+            "value": "Reputation API not configured",
+            "safe": True,
+            "risk_points": 0,
+        }
+
+    endpoint = (
+        "https://safebrowsing.googleapis.com/v4/"
+        f"threatMatches:find?key={api_key}"
+    )
+
+    payload = {
+        "client": {
+            "clientId": "cybersentinel-ai",
+            "clientVersion": "1.1.0",
+        },
+        "threatInfo": {
+            "threatTypes": [
+                "MALWARE",
+                "SOCIAL_ENGINEERING",
+                "UNWANTED_SOFTWARE",
+                "POTENTIALLY_HARMFUL_APPLICATION",
+            ],
+            "platformTypes": ["ANY_PLATFORM"],
+            "threatEntryTypes": ["URL"],
+            "threatEntries": [{"url": url}],
+        },
+    }
+
+    try:
+        response = requests.post(
+            endpoint,
+            json=payload,
+            timeout=8,
+        )
+
+        if response.status_code != 200:
+            return {
+                "status": "unavailable",
+                "value": (
+                    f"Reputation check unavailable "
+                    f"(HTTP {response.status_code})"
+                ),
+                "safe": False,
+                "risk_points": 0,
+            }
+
+        data = response.json()
+        matches = data.get("matches", [])
+
+        if matches:
+            threat_types = sorted({
+                match.get("threatType", "UNKNOWN")
+                for match in matches
+            })
+
+            readable_types = []
+            threat_labels = {
+                "SOCIAL_ENGINEERING": "Phishing",
+                "MALWARE": "Malware",
+                "UNWANTED_SOFTWARE": "Unwanted software",
+                "POTENTIALLY_HARMFUL_APPLICATION": "Potentially harmful",
+            }
+
+            for threat in threat_types:
+                readable_types.append(
+                    threat_labels.get(threat, threat)
+                )
+
+            return {
+                "status": "malicious",
+                "value": (
+                    "Threat detected: "
+                    + ", ".join(readable_types)
+                ),
+                "safe": False,
+                "risk_points": 70,
+            }
+
+        return {
+            "status": "clean",
+            "value": "No known threat found",
+            "safe": True,
+            "risk_points": 0,
+        }
+
+    except requests.Timeout:
+        return {
+            "status": "timeout",
+            "value": "Reputation check timed out",
+            "safe": False,
+            "risk_points": 0,
+        }
+
+    except requests.RequestException:
+        return {
+            "status": "unavailable",
+            "value": "Reputation service unavailable",
+            "safe": False,
+            "risk_points": 0,
+        }
+
+
 @app.post("/api/scan/url")
 def scan_url(request: URLScanRequest):
 
@@ -84,13 +201,19 @@ def scan_url(request: URLScanRequest):
             "error": "Please enter a URL.",
         }
 
-    # Add HTTPS if user enters example.com
+    # ---------------------------------------------------------
+    # NORMALIZE URL
+    # ---------------------------------------------------------
+
     if not raw_url.lower().startswith(("http://", "https://")):
         normalized_url = "https://" + raw_url
     else:
         normalized_url = raw_url
 
-    # Parse URL
+    # ---------------------------------------------------------
+    # PARSE URL
+    # ---------------------------------------------------------
+
     try:
         parsed = urlparse(normalized_url)
         hostname = parsed.hostname
@@ -111,9 +234,9 @@ def scan_url(request: URLScanRequest):
     indicators = []
     risk_points = 0
 
-    # ---------------------------------------------------------
-    # HTTPS CHECK
-    # ---------------------------------------------------------
+    # =========================================================
+    # 1. HTTPS CHECK
+    # =========================================================
 
     if parsed.scheme.lower() == "https":
         indicators.append({
@@ -129,9 +252,9 @@ def scan_url(request: URLScanRequest):
         })
         risk_points += 25
 
-    # ---------------------------------------------------------
-    # IP ADDRESS CHECK
-    # ---------------------------------------------------------
+    # =========================================================
+    # 2. IP ADDRESS CHECK
+    # =========================================================
 
     try:
         ip_address(hostname)
@@ -153,9 +276,9 @@ def scan_url(request: URLScanRequest):
             "safe": True,
         })
 
-    # ---------------------------------------------------------
-    # SUSPICIOUS KEYWORDS
-    # ---------------------------------------------------------
+    # =========================================================
+    # 3. SUSPICIOUS KEYWORDS
+    # =========================================================
 
     suspicious_words = [
         "login",
@@ -170,13 +293,31 @@ def scan_url(request: URLScanRequest):
         "wallet",
         "password",
         "bank",
+        "support",
+        "unlock",
+        "authenticate",
+        "credential",
     ]
 
-    matched_words = [
+    hostname_matches = [
         word
         for word in suspicious_words
         if word in hostname
     ]
+
+    path_and_query = (
+        f"{parsed.path}?{parsed.query}"
+    ).lower()
+
+    url_matches = [
+        word
+        for word in suspicious_words
+        if word in path_and_query
+    ]
+
+    matched_words = sorted(
+        set(hostname_matches + url_matches)
+    )
 
     if matched_words:
         indicators.append({
@@ -185,10 +326,8 @@ def scan_url(request: URLScanRequest):
             "safe": False,
         })
 
-        risk_points += min(
-            len(matched_words) * 10,
-            30,
-        )
+        risk_points += min(len(matched_words) * 7, 30)
+
     else:
         indicators.append({
             "label": "Suspicious keywords",
@@ -196,19 +335,28 @@ def scan_url(request: URLScanRequest):
             "safe": True,
         })
 
-    # ---------------------------------------------------------
-    # DOMAIN STRUCTURE
-    # ---------------------------------------------------------
+    # =========================================================
+    # 4. DOMAIN STRUCTURE
+    # =========================================================
 
     domain_parts = hostname.split(".")
 
-    if len(domain_parts) > 3:
+    if len(domain_parts) > 4:
+        indicators.append({
+            "label": "Domain structure",
+            "value": "Excessive subdomains",
+            "safe": False,
+        })
+        risk_points += 20
+
+    elif len(domain_parts) > 3:
         indicators.append({
             "label": "Domain structure",
             "value": "Multiple subdomains",
             "safe": False,
         })
         risk_points += 15
+
     else:
         indicators.append({
             "label": "Domain structure",
@@ -216,45 +364,335 @@ def scan_url(request: URLScanRequest):
             "safe": True,
         })
 
-    # ---------------------------------------------------------
-    # URL LENGTH
-    # ---------------------------------------------------------
+    # =========================================================
+    # 5. URL LENGTH
+    # =========================================================
 
-    if len(normalized_url) > 150:
+    url_length = len(normalized_url)
+
+    if url_length > 250:
         indicators.append({
             "label": "URL length",
-            "value": "Unusually long",
+            "value": f"{url_length} characters — Very long",
+            "safe": False,
+        })
+        risk_points += 15
+
+    elif url_length > 150:
+        indicators.append({
+            "label": "URL length",
+            "value": f"{url_length} characters — Long",
             "safe": False,
         })
         risk_points += 10
+
     else:
         indicators.append({
             "label": "URL length",
+            "value": f"{url_length} characters — Normal",
+            "safe": True,
+        })
+
+    # =========================================================
+    # 6. PORT CHECK
+    # =========================================================
+
+    suspicious_ports = {
+        21: "FTP",
+        22: "SSH",
+        23: "Telnet",
+        25: "SMTP",
+        445: "SMB",
+        3389: "RDP",
+        5900: "VNC",
+        8080: "HTTP Proxy",
+        8443: "Alternative HTTPS",
+    }
+
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+
+    if port is None:
+        indicators.append({
+            "label": "Network port",
+            "value": "Standard port",
+            "safe": True,
+        })
+
+    elif port in suspicious_ports:
+        indicators.append({
+            "label": "Network port",
+            "value": f"Port {port} ({suspicious_ports[port]})",
+            "safe": False,
+        })
+        risk_points += 10
+
+    else:
+        indicators.append({
+            "label": "Network port",
+            "value": f"Custom port {port}",
+            "safe": False,
+        })
+        risk_points += 5
+
+    # =========================================================
+    # 7. @ SYMBOL CHECK
+    # =========================================================
+
+    if "@" in normalized_url:
+        indicators.append({
+            "label": "URL obfuscation",
+            "value": "@ symbol detected",
+            "safe": False,
+        })
+        risk_points += 20
+    else:
+        indicators.append({
+            "label": "URL obfuscation",
+            "value": "No @ symbol detected",
+            "safe": True,
+        })
+
+    # =========================================================
+    # 8. ENCODED CHARACTER CHECK
+    # =========================================================
+
+    encoded_matches = re.findall(
+        r"%[0-9a-fA-F]{2}",
+        normalized_url,
+    )
+
+    if len(encoded_matches) >= 5:
+        indicators.append({
+            "label": "Encoded characters",
+            "value": f"{len(encoded_matches)} encoded sequences",
+            "safe": False,
+        })
+        risk_points += 10
+
+    elif encoded_matches:
+        indicators.append({
+            "label": "Encoded characters",
+            "value": f"{len(encoded_matches)} encoded sequence(s)",
+            "safe": True,
+        })
+
+    else:
+        indicators.append({
+            "label": "Encoded characters",
+            "value": "None detected",
+            "safe": True,
+        })
+
+    # =========================================================
+    # 9. SUSPICIOUS TLD
+    # =========================================================
+
+    suspicious_tlds = {
+        ".tk",
+        ".ml",
+        ".ga",
+        ".cf",
+        ".gq",
+        ".click",
+        ".top",
+        ".zip",
+        ".mov",
+        ".work",
+        ".country",
+        ".support",
+        ".download",
+    }
+
+    matched_tld = None
+
+    for tld in suspicious_tlds:
+        if hostname.endswith(tld):
+            matched_tld = tld
+            break
+
+    if matched_tld:
+        indicators.append({
+            "label": "Domain extension",
+            "value": f"Potentially risky TLD {matched_tld}",
+            "safe": False,
+        })
+        risk_points += 15
+
+    else:
+        indicators.append({
+            "label": "Domain extension",
+            "value": "No high-risk TLD detected",
+            "safe": True,
+        })
+
+    # =========================================================
+    # 10. HYPHEN / DOMAIN OBFUSCATION
+    # =========================================================
+
+    hyphen_count = hostname.count("-")
+
+    if hyphen_count >= 3:
+        indicators.append({
+            "label": "Domain naming",
+            "value": f"{hyphen_count} hyphens detected",
+            "safe": False,
+        })
+        risk_points += 10
+
+    else:
+        indicators.append({
+            "label": "Domain naming",
             "value": "Normal",
             "safe": True,
         })
 
-    # ---------------------------------------------------------
-    # URL SCORE
-    # ---------------------------------------------------------
+    # =========================================================
+    # 11. SUSPICIOUS PATH
+    # =========================================================
+
+    suspicious_path_patterns = [
+        r"/login",
+        r"/signin",
+        r"/verify",
+        r"/account",
+        r"/password",
+        r"/payment",
+        r"/wallet",
+        r"/credential",
+        r"/auth",
+        r"/secure",
+    ]
+
+    path_matches = [
+        pattern
+        for pattern in suspicious_path_patterns
+        if re.search(pattern, parsed.path.lower())
+    ]
+
+    if path_matches:
+        indicators.append({
+            "label": "URL path",
+            "value": "Sensitive-looking path detected",
+            "safe": False,
+        })
+        risk_points += 10
+
+    else:
+        indicators.append({
+            "label": "URL path",
+            "value": "No obvious sensitive path",
+            "safe": True,
+        })
+
+    # =========================================================
+    # 12. QUERY PARAMETERS
+    # =========================================================
+
+    query_length = len(parsed.query)
+
+    if query_length > 150:
+        indicators.append({
+            "label": "Query parameters",
+            "value": "Unusually large query string",
+            "safe": False,
+        })
+        risk_points += 10
+
+    else:
+        indicators.append({
+            "label": "Query parameters",
+            "value": "Normal",
+            "safe": True,
+        })
+
+    # =========================================================
+    # 13. DOUBLE SLASH / OBFUSCATION
+    # =========================================================
+
+    suspicious_double_slash = (
+        "//" in parsed.path
+    )
+
+    if suspicious_double_slash:
+        indicators.append({
+            "label": "Path structure",
+            "value": "Unusual double slash detected",
+            "safe": False,
+        })
+        risk_points += 5
+
+    else:
+        indicators.append({
+            "label": "Path structure",
+            "value": "Normal",
+            "safe": True,
+        })
+
+    # =========================================================
+    # 14. PHISHING / DOMAIN REPUTATION
+    # =========================================================
+
+    reputation = check_url_reputation(normalized_url)
+
+    if reputation["status"] == "malicious":
+        indicators.append({
+            "label": "Domain reputation",
+            "value": reputation["value"],
+            "safe": False,
+        })
+        risk_points += reputation["risk_points"]
+
+    elif reputation["status"] == "clean":
+        indicators.append({
+            "label": "Domain reputation",
+            "value": reputation["value"],
+            "safe": True,
+        })
+
+    elif reputation["status"] == "not_configured":
+        indicators.append({
+            "label": "Domain reputation",
+            "value": "Not configured",
+            "safe": True,
+        })
+
+    else:
+        indicators.append({
+            "label": "Domain reputation",
+            "value": reputation["value"],
+            "safe": False,
+        })
+
+    # =========================================================
+    # FINAL SCORE
+    # =========================================================
 
     risk_points = min(risk_points, 100)
     score = 100 - risk_points
+
+    # =========================================================
+    # CLASSIFICATION
+    # =========================================================
 
     if risk_points >= 60:
         status = "threat"
         risk_level = "High"
         summary = (
-            "Multiple suspicious indicators were detected. "
-            "This URL should be treated with caution."
+            "Multiple high-risk indicators were detected. "
+            "This URL should be treated as potentially malicious "
+            "and should not be trusted without further verification."
         )
 
     elif risk_points >= 25:
         status = "suspicious"
         risk_level = "Medium"
         summary = (
-            "Some suspicious patterns were detected. "
-            "Additional verification is recommended."
+            "Several suspicious patterns were detected. "
+            "Verify the domain and destination before interacting "
+            "with this URL."
         )
 
     else:
@@ -262,8 +700,12 @@ def scan_url(request: URLScanRequest):
         risk_level = "Low"
         summary = (
             "No obvious high-risk patterns were detected "
-            "in this initial analysis."
+            "during this initial static URL analysis."
         )
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
 
     return {
         "success": True,
@@ -317,17 +759,13 @@ def analyze_password(request: PasswordAnalyzeRequest):
 
     # =========================================================
     # SCORE SYSTEM
-    #
-    # Start from 0 and award points for good security
-    # characteristics instead of subtracting large penalties.
-    # This allows genuinely strong passwords to reach 90-100.
     # =========================================================
 
     score = 0
 
-    # ---------------------------------------------------------
+    # =========================================================
     # LENGTH SCORE
-    # ---------------------------------------------------------
+    # =========================================================
 
     if length >= 20:
         score += 35
@@ -391,9 +829,9 @@ def analyze_password(request: PasswordAnalyzeRequest):
             "Use a password of at least 12 characters."
         )
 
-    # ---------------------------------------------------------
-    # CHARACTER DIVERSITY SCORE
-    # ---------------------------------------------------------
+    # =========================================================
+    # CHARACTER DIVERSITY
+    # =========================================================
 
     diversity_points = {
         4: 25,
@@ -406,6 +844,7 @@ def analyze_password(request: PasswordAnalyzeRequest):
     score += diversity_points[diversity]
 
     if diversity == 4:
+
         indicators.append({
             "label": "Character diversity",
             "value": "Uppercase, lowercase, numbers & symbols",
@@ -413,6 +852,7 @@ def analyze_password(request: PasswordAnalyzeRequest):
         })
 
     elif diversity == 3:
+
         indicators.append({
             "label": "Character diversity",
             "value": "Good variety",
@@ -424,6 +864,7 @@ def analyze_password(request: PasswordAnalyzeRequest):
         )
 
     else:
+
         indicators.append({
             "label": "Character diversity",
             "value": "Limited variety",
@@ -434,9 +875,9 @@ def analyze_password(request: PasswordAnalyzeRequest):
             "Mix uppercase, lowercase, numbers and symbols."
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # REPETITION CHECK
-    # ---------------------------------------------------------
+    # =========================================================
 
     if re.search(r"(.)\1\1", password):
 
@@ -462,9 +903,9 @@ def analyze_password(request: PasswordAnalyzeRequest):
             "safe": True,
         })
 
-    # ---------------------------------------------------------
+    # =========================================================
     # COMMON PATTERN CHECK
-    # ---------------------------------------------------------
+    # =========================================================
 
     common_patterns = [
         "123456",
@@ -510,9 +951,9 @@ def analyze_password(request: PasswordAnalyzeRequest):
             "safe": True,
         })
 
-    # ---------------------------------------------------------
+    # =========================================================
     # COMMON PASSWORD CHECK
-    # ---------------------------------------------------------
+    # =========================================================
 
     common_passwords = {
         "password",
@@ -561,9 +1002,6 @@ def analyze_password(request: PasswordAnalyzeRequest):
 
     # =========================================================
     # HAVE I BEEN PWNED — K-ANONYMITY
-    #
-    # Only the first 5 characters of the SHA-1 hash are sent
-    # to the HIBP range endpoint.
     # =========================================================
 
     leaked_count = 0
