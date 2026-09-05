@@ -11,6 +11,11 @@ import {
   ShieldCheck,
   Terminal,
   XCircle,
+  Activity,
+  Bug,
+  SearchCheck,
+  Clock3,
+  Gauge,
 } from 'lucide-react'
 
 type Indicator = {
@@ -47,6 +52,7 @@ function URLScanner() {
   const loadHistory = async () => {
     try {
       setHistoryError('')
+
       const response = await fetch(
         'http://127.0.0.1:8000/api/scan/history',
       )
@@ -96,12 +102,18 @@ function URLScanner() {
 
     try {
       setHistoryError('')
+
       const response = await fetch(
         'http://127.0.0.1:8000/api/scan/history',
-        { method: 'DELETE' },
+        {
+          method: 'DELETE',
+        },
       )
 
-      let data: { success?: boolean; error?: string }
+      let data: {
+        success?: boolean
+        error?: string
+      }
 
       try {
         data = await response.json()
@@ -112,7 +124,9 @@ function URLScanner() {
       }
 
       if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Unable to clear scan history.')
+        throw new Error(
+          data.error || 'Unable to clear scan history.',
+        )
       }
 
       setHistory([])
@@ -127,7 +141,10 @@ function URLScanner() {
 
   const formatScanTime = (value: string) => {
     const date = new Date(value)
-    if (Number.isNaN(date.getTime())) return value
+
+    if (Number.isNaN(date.getTime())) {
+      return value
+    }
 
     return date.toLocaleString([], {
       dateStyle: 'medium',
@@ -135,7 +152,9 @@ function URLScanner() {
     })
   }
 
-  const analyzeUrl = async (event: FormEvent<HTMLFormElement>) => {
+  const analyzeUrl = async (
+    event: FormEvent<HTMLFormElement>,
+  ) => {
     event.preventDefault()
 
     const trimmedUrl = url.trim()
@@ -193,8 +212,17 @@ function URLScanner() {
     }
   }
 
+  const getIndicator = (label: string) => {
+    return result?.indicators.find(
+      (indicator) =>
+        indicator.label.toLowerCase() === label.toLowerCase(),
+    )
+  }
+
   const getStatusIcon = () => {
-    if (!result) return <ShieldCheck size={30} />
+    if (!result) {
+      return <ShieldCheck size={30} />
+    }
 
     if (result.status === 'threat') {
       return <ShieldAlert size={30} />
@@ -208,7 +236,9 @@ function URLScanner() {
   }
 
   const getStatusTitle = () => {
-    if (!result) return 'Awaiting Scan'
+    if (!result) {
+      return 'Awaiting Scan'
+    }
 
     if (result.status === 'threat') {
       return 'Threat Detected'
@@ -222,7 +252,9 @@ function URLScanner() {
   }
 
   const generateReport = async () => {
-    if (!result || reportGenerating) return
+    if (!result || reportGenerating) {
+      return
+    }
 
     try {
       setReportGenerating(true)
@@ -254,7 +286,7 @@ function URLScanner() {
           const data = await response.json()
           message = data.error || message
         } catch {
-          // Keep the HTTP fallback message.
+          // Keep HTTP fallback message.
         }
 
         throw new Error(message)
@@ -299,6 +331,34 @@ function URLScanner() {
     return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
   }
 
+  const getScoreLabel = () => {
+    if (!result) {
+      return 'Waiting'
+    }
+
+    if (result.score >= 80) {
+      return 'Low Risk'
+    }
+
+    if (result.score >= 50) {
+      return 'Moderate Risk'
+    }
+
+    if (result.score >= 25) {
+      return 'High Risk'
+    }
+
+    return 'Critical Risk'
+  }
+
+  const getScoreWidth = () => {
+    if (!result) {
+      return '0%'
+    }
+
+    return `${Math.max(0, Math.min(100, result.score))}%`
+  }
+
   return (
     <div className="min-h-full bg-slate-950 px-6 py-8 text-slate-100 md:px-10">
       <div className="mx-auto max-w-6xl">
@@ -323,17 +383,16 @@ function URLScanner() {
 
           <p className="max-w-2xl text-sm leading-6 text-slate-400">
             Analyze a URL for suspicious patterns, unsafe protocols,
-            unusual domain structures, and other security indicators.
+            unusual domain structures, reputation threats, and other
+            security indicators.
           </p>
         </div>
 
         {/* Scanner Card */}
         <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70 shadow-2xl shadow-cyan-950/10">
-
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-500/70 to-transparent" />
 
           <div className="p-6 md:p-8">
-
             <div className="mb-6 flex items-center gap-2 text-xs font-medium uppercase tracking-widest text-slate-500">
               <Terminal size={15} />
               <span>Security Analysis Console</span>
@@ -348,7 +407,6 @@ function URLScanner() {
               </label>
 
               <div className="flex flex-col gap-3 md:flex-row">
-
                 <div className="relative flex-1">
                   <Globe
                     size={18}
@@ -426,7 +484,8 @@ function URLScanner() {
             </h2>
 
             <p className="mt-2 text-sm text-slate-500">
-              Checking URL structure and security indicators...
+              Checking URL structure, reputation, threat intelligence,
+              and security indicators...
             </p>
           </div>
         )}
@@ -440,7 +499,6 @@ function URLScanner() {
 
               {/* Score */}
               <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
-
                 <div className="mb-5 flex items-center justify-between">
                   <span className="text-xs font-semibold uppercase tracking-widest text-slate-500">
                     Risk Score
@@ -471,11 +529,31 @@ function URLScanner() {
                   {getStatusIcon()}
                   <span>{result.risk_level} Risk</span>
                 </div>
+
+                <div className="mt-4">
+                  <div className="mb-2 flex items-center justify-between text-xs">
+                    <span className="text-slate-500">
+                      Security confidence
+                    </span>
+
+                    <span className="font-semibold text-cyan-400">
+                      {result.score}%
+                    </span>
+                  </div>
+
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className="h-full rounded-full bg-cyan-500 transition-all duration-700"
+                      style={{
+                        width: getScoreWidth(),
+                      }}
+                    />
+                  </div>
+                </div>
               </div>
 
               {/* Status */}
               <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
-
                 <div
                   className={`mb-6 flex items-center gap-4 rounded-xl border p-5 ${getStatusClass()}`}
                 >
@@ -503,12 +581,219 @@ function URLScanner() {
                     {url}
                   </div>
                 </div>
+
+                {result.scanned_at && (
+                  <div className="mt-4 flex items-center gap-2 text-xs text-slate-500">
+                    <Clock3 size={14} />
+                    <span>
+                      Scanned {formatScanTime(result.scanned_at)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Threat Intelligence */}
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
+              <div className="mb-6 flex items-start justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Activity
+                      size={20}
+                      className="text-cyan-400"
+                    />
+
+                    <h2 className="text-lg font-bold text-white">
+                      Threat Intelligence
+                    </h2>
+                  </div>
+
+                  <p className="mt-1 text-sm text-slate-500">
+                    External reputation checks and automated security
+                    intelligence collected during this scan.
+                  </p>
+                </div>
+
+                <span className="hidden rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3 py-1.5 text-xs font-semibold text-cyan-400 sm:block">
+                  LIVE ANALYSIS
+                </span>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
+
+                {/* Google Safe Browsing */}
+                {(() => {
+                  const indicator = getIndicator(
+                    'Domain reputation',
+                  )
+
+                  return (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-5">
+                      <div className="mb-4 flex items-center justify-between">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-500/20 bg-emerald-500/10 text-emerald-400">
+                          <ShieldCheck size={20} />
+                        </div>
+
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">
+                          Reputation
+                        </span>
+                      </div>
+
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                        Google Safe Browsing
+                      </p>
+
+                      <p
+                        className={`mt-2 text-sm font-semibold ${
+                          indicator?.safe
+                            ? 'text-emerald-400'
+                            : 'text-red-400'
+                        }`}
+                      >
+                        {indicator?.value || 'No result available'}
+                      </p>
+
+                      <div className="mt-4 flex items-center gap-2 text-xs text-slate-600">
+                        <SearchCheck size={13} />
+                        <span>
+                          {indicator?.safe
+                            ? 'No known threat detected'
+                            : 'Threat indicator detected'}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* VirusTotal */}
+                {(() => {
+                  const indicator = getIndicator('VirusTotal')
+
+                  return (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-5">
+                      <div className="mb-4 flex items-center justify-between">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-purple-500/20 bg-purple-500/10 text-purple-400">
+                          <Bug size={20} />
+                        </div>
+
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">
+                          Multi Engine
+                        </span>
+                      </div>
+
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                        VirusTotal
+                      </p>
+
+                      <p
+                        className={`mt-2 text-sm font-semibold ${
+                          indicator?.safe
+                            ? 'text-emerald-400'
+                            : 'text-red-400'
+                        }`}
+                      >
+                        {indicator?.value || 'No result available'}
+                      </p>
+
+                      <div className="mt-4 flex items-center gap-2 text-xs text-slate-600">
+                        <Gauge size={13} />
+                        <span>
+                          Multi-engine URL reputation analysis
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* Static Analysis */}
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-5">
+                  <div className="mb-4 flex items-center justify-between">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-cyan-500/20 bg-cyan-500/10 text-cyan-400">
+                      <Terminal size={20} />
+                    </div>
+
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">
+                      Static
+                    </span>
+                  </div>
+
+                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    Static URL Analysis
+                  </p>
+
+                  <p className="mt-2 text-sm font-semibold text-cyan-400">
+                    {result.indicators.length} checks performed
+                  </p>
+
+                  <div className="mt-4 flex items-center gap-2 text-xs text-slate-600">
+                    <Activity size={13} />
+                    <span>
+                      Structure and security pattern analysis
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Assessment Summary */}
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+                <div className="mb-3 flex items-center gap-2 text-slate-500">
+                  <Gauge size={17} />
+                  <span className="text-xs font-semibold uppercase tracking-widest">
+                    Assessment
+                  </span>
+                </div>
+
+                <p className="text-lg font-bold text-white">
+                  {getScoreLabel()}
+                </p>
+
+                <p className="mt-1 text-xs text-slate-600">
+                  Based on the combined security score.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+                <div className="mb-3 flex items-center gap-2 text-slate-500">
+                  <SearchCheck size={17} />
+                  <span className="text-xs font-semibold uppercase tracking-widest">
+                    Indicators
+                  </span>
+                </div>
+
+                <p className="text-lg font-bold text-white">
+                  {result.indicators.filter(
+                    (indicator) => !indicator.safe,
+                  ).length}{' '}
+                  flagged
+                </p>
+
+                <p className="mt-1 text-xs text-slate-600">
+                  Security checks requiring attention.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+                <div className="mb-3 flex items-center gap-2 text-slate-500">
+                  <Clock3 size={17} />
+                  <span className="text-xs font-semibold uppercase tracking-widest">
+                    Scan Status
+                  </span>
+                </div>
+
+                <p className="text-lg font-bold text-emerald-400">
+                  Completed
+                </p>
+
+                <p className="mt-1 text-xs text-slate-600">
+                  Automated security assessment finished.
+                </p>
               </div>
             </div>
 
             {/* Indicators */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
-
               <div className="mb-5">
                 <h2 className="text-lg font-bold text-white">
                   Security Indicators
@@ -550,7 +835,10 @@ function URLScanner() {
                           : 'text-yellow-400'
                       }`}
                     >
-                      {indicator.value}
+                      {indicator.value
+                        .replace('â', '—')
+                        .replace('â€“', '—')
+                        .replace('â€”', '—')}
                     </span>
                   </div>
                 ))}
@@ -573,7 +861,10 @@ function URLScanner() {
             >
               {reportGenerating ? (
                 <>
-                  <Loader2 size={18} className="animate-spin" />
+                  <Loader2
+                    size={18}
+                    className="animate-spin"
+                  />
                   Generating PDF Report...
                 </>
               ) : (
@@ -593,9 +884,11 @@ function URLScanner() {
               <p className="text-xs font-semibold uppercase tracking-widest text-cyan-400">
                 Security Archive
               </p>
+
               <h2 className="mt-1 text-lg font-bold text-white">
                 Recent Scan History
               </h2>
+
               <p className="mt-1 text-sm text-slate-500">
                 Your latest 20 URL security assessments are stored locally.
               </p>
@@ -620,15 +913,23 @@ function URLScanner() {
 
           {historyLoading ? (
             <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-5 text-sm text-slate-500">
-              <Loader2 size={17} className="animate-spin text-cyan-400" />
+              <Loader2
+                size={17}
+                className="animate-spin text-cyan-400"
+              />
               Loading scan history...
             </div>
           ) : history.length === 0 ? (
             <div className="rounded-xl border border-dashed border-slate-800 bg-slate-950/40 p-7 text-center">
-              <ScanSearch size={26} className="mx-auto mb-3 text-slate-700" />
+              <ScanSearch
+                size={26}
+                className="mx-auto mb-3 text-slate-700"
+              />
+
               <p className="text-sm font-medium text-slate-400">
                 No scans yet
               </p>
+
               <p className="mt-1 text-xs text-slate-600">
                 Completed URL scans will appear here automatically.
               </p>
@@ -649,6 +950,7 @@ function URLScanner() {
                     type="button"
                     onClick={() => {
                       setUrl(item.url)
+
                       setResult({
                         score: item.score,
                         status: item.status,
@@ -657,8 +959,13 @@ function URLScanner() {
                         indicators: item.indicators,
                         scanned_at: item.scanned_at,
                       })
+
                       setError('')
-                      window.scrollTo({ top: 0, behavior: 'smooth' })
+
+                      window.scrollTo({
+                        top: 0,
+                        behavior: 'smooth',
+                      })
                     }}
                     className="w-full rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-left transition hover:border-cyan-500/30 hover:bg-slate-950"
                   >
@@ -667,15 +974,21 @@ function URLScanner() {
                         <p className="truncate font-mono text-sm text-cyan-400">
                           {item.url}
                         </p>
+
                         <p className="mt-1 text-xs text-slate-600">
-                          {formatScanTime(item.scanned_at ?? '')}
+                          {formatScanTime(
+                            item.scanned_at ?? '',
+                          )}
                         </p>
                       </div>
 
                       <div className="flex items-center gap-3">
-                        <span className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${statusClass}`}>
+                        <span
+                          className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${statusClass}`}
+                        >
                           {item.risk_level} Risk
                         </span>
+
                         <span className="text-lg font-black text-white">
                           {item.score}
                         </span>
@@ -706,7 +1019,6 @@ function URLScanner() {
             </p>
           </div>
         )}
-
       </div>
     </div>
   )
