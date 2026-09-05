@@ -1,9 +1,9 @@
-
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
+  FileDown,
   Globe,
   Loader2,
   ScanSearch,
@@ -42,11 +42,14 @@ function URLScanner() {
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(true)
   const [historyError, setHistoryError] = useState('')
+  const [reportGenerating, setReportGenerating] = useState(false)
 
   const loadHistory = async () => {
     try {
       setHistoryError('')
-      const response = await fetch('http://127.0.0.1:8000/api/scan/history')
+      const response = await fetch(
+        'http://127.0.0.1:8000/api/scan/history',
+      )
 
       let data: {
         success?: boolean
@@ -178,7 +181,7 @@ function URLScanner() {
         scanned_at: data.scanned_at,
       })
 
-      void loadHistory()
+      await loadHistory()
     } catch (err) {
       setError(
         err instanceof Error
@@ -216,6 +219,68 @@ function URLScanner() {
     }
 
     return 'URL Appears Safe'
+  }
+
+  const generateReport = async () => {
+    if (!result || reportGenerating) return
+
+    try {
+      setReportGenerating(true)
+      setError('')
+
+      const response = await fetch(
+        'http://127.0.0.1:8000/api/report/pdf',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            url,
+            score: result.score,
+            status: result.status,
+            risk_level: result.risk_level,
+            summary: result.summary,
+            indicators: result.indicators,
+            scanned_at: result.scanned_at,
+          }),
+        },
+      )
+
+      if (!response.ok) {
+        let message = `Report generation failed (HTTP ${response.status}).`
+
+        try {
+          const data = await response.json()
+          message = data.error || message
+        } catch {
+          // Keep the HTTP fallback message.
+        }
+
+        throw new Error(message)
+      }
+
+      const blob = await response.blob()
+      const downloadUrl = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+
+      link.href = downloadUrl
+      link.download = 'CyberSentinel_Security_Report.pdf'
+
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+
+      window.URL.revokeObjectURL(downloadUrl)
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to generate security report.',
+      )
+    } finally {
+      setReportGenerating(false)
+    }
   }
 
   const getStatusClass = () => {
@@ -498,6 +563,26 @@ function URLScanner() {
               A low-risk result does not guarantee that a website
               is completely safe.
             </div>
+
+            {/* PDF Report */}
+            <button
+              type="button"
+              onClick={() => void generateReport()}
+              disabled={reportGenerating}
+              className="flex w-full items-center justify-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-3 text-sm font-semibold text-cyan-400 transition hover:bg-cyan-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {reportGenerating ? (
+                <>
+                  <Loader2 size={18} className="animate-spin" />
+                  Generating PDF Report...
+                </>
+              ) : (
+                <>
+                  <FileDown size={18} />
+                  Generate Security Report
+                </>
+              )}
+            </button>
           </div>
         )}
 
