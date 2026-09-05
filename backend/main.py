@@ -3,6 +3,10 @@ from ipaddress import ip_address
 import hashlib
 import re
 import os
+import time
+import json
+import sqlite3
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 import requests
@@ -10,7 +14,104 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE = os.path.join(BASE_DIR, ".env")
+load_dotenv(dotenv_path=ENV_FILE, override=False)
+
+
+# =========================================================
+# SCAN HISTORY DATABASE
+# =========================================================
+
+DB_FILE = os.path.join(BASE_DIR, "cybersentinel.db")
+
+
+def get_db_connection():
+    connection = sqlite3.connect(DB_FILE)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_scan_history_db():
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scan_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                indicators TEXT NOT NULL,
+                scanned_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+
+def save_scan_history(scan_result):
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO scan_history
+            (url, domain, score, status, risk_level, summary, indicators, scanned_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scan_result["url"],
+                scan_result["domain"],
+                scan_result["score"],
+                scan_result["status"],
+                scan_result["risk_level"],
+                scan_result["summary"],
+                json.dumps(scan_result["indicators"]),
+                scan_result["scanned_at"],
+            ),
+        )
+        connection.commit()
+
+
+def get_scan_history(limit=20):
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, url, domain, score, status, risk_level,
+                   summary, indicators, scanned_at
+            FROM scan_history
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    history = []
+    for row in rows:
+        history.append({
+            "id": row["id"],
+            "url": row["url"],
+            "domain": row["domain"],
+            "score": row["score"],
+            "status": row["status"],
+            "risk_level": row["risk_level"],
+            "summary": row["summary"],
+            "indicators": json.loads(row["indicators"]),
+            "scanned_at": row["scanned_at"],
+        })
+
+    return history
+
+
+def clear_scan_history():
+    with get_db_connection() as connection:
+        connection.execute("DELETE FROM scan_history")
+        connection.commit()
+
+
+init_scan_history_db()
+
 
 app = FastAPI(
     title="CyberSentinel AI",
@@ -75,6 +176,62 @@ def health():
 # =========================================================
 # URL SCANNER
 # =========================================================
+
+# =========================================================
+# SCAN HISTORY API
+# =========================================================
+
+@app.get("/api/scan/history")
+def scan_history():
+    return {
+        "success": True,
+        "history": get_scan_history(20),
+    }
+
+
+@app.get("/api/scan/stats")
+def scan_stats():
+    with get_db_connection() as connection:
+        total = connection.execute(
+            "SELECT COUNT(*) AS count FROM scan_history"
+        ).fetchone()["count"]
+
+        safe = connection.execute(
+            "SELECT COUNT(*) AS count FROM scan_history WHERE status = 'safe'"
+        ).fetchone()["count"]
+
+        suspicious = connection.execute(
+            "SELECT COUNT(*) AS count FROM scan_history WHERE status = 'suspicious'"
+        ).fetchone()["count"]
+
+        threat = connection.execute(
+            "SELECT COUNT(*) AS count FROM scan_history WHERE status = 'threat'"
+        ).fetchone()["count"]
+
+        average_score = connection.execute(
+            "SELECT COALESCE(AVG(score), 0) AS average FROM scan_history"
+        ).fetchone()["average"]
+
+    return {
+        "success": True,
+        "stats": {
+            "total_scans": total,
+            "safe_urls": safe,
+            "suspicious_urls": suspicious,
+            "threats_detected": threat,
+            "average_risk_score": round(average_score, 1),
+        },
+    }
+
+
+@app.delete("/api/scan/history")
+def delete_scan_history():
+    clear_scan_history()
+    return {
+        "success": True,
+        "message": "Scan history cleared.",
+    }
+
 
 # =========================================================
 # GOOGLE SAFE BROWSING REPUTATION CHECK
@@ -185,6 +342,236 @@ def check_url_reputation(url: str):
         return {
             "status": "unavailable",
             "value": "Reputation service unavailable",
+            "safe": False,
+            "risk_points": 0,
+        }
+
+    # =========================================================
+# VIRUSTOTAL URL REPUTATION CHECK
+# =========================================================
+
+def check_virustotal(url: str):
+    """Submit a URL to VirusTotal and poll until the analysis is completed."""
+
+    api_key = os.getenv("VIRUSTOTAL_API_KEY", "").strip()
+
+    if not api_key:
+        return {
+            "status": "not_configured",
+            "value": "VirusTotal API not configured",
+            "safe": True,
+            "risk_points": 0,
+        }
+
+    # VirusTotal expects a real HTTP/HTTPS URL.
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return {
+            "status": "unavailable",
+            "value": "VirusTotal received an invalid URL",
+            "safe": False,
+            "risk_points": 0,
+        }
+
+    headers = {
+        "x-apikey": api_key,
+        "Accept": "application/json",
+    }
+
+    try:
+        # Submit URL for analysis.
+        response = requests.post(
+            "https://www.virustotal.com/api/v3/urls",
+            headers=headers,
+            data={"url": url},
+            timeout=15,
+        )
+
+        if response.status_code not in (200, 201):
+            try:
+                error_data = response.json()
+                error_message = (
+                    error_data.get("error", {}).get("message")
+                    or error_data.get("error", {}).get("code")
+                    or response.text[:300]
+                )
+            except ValueError:
+                error_message = response.text[:300]
+
+            return {
+                "status": "unavailable",
+                "value": (
+                    f"VirusTotal HTTP {response.status_code}: "
+                    f"{error_message}"
+                ),
+                "safe": False,
+                "risk_points": 0,
+            }
+
+        try:
+            analysis_id = response.json().get("data", {}).get("id")
+        except ValueError:
+            analysis_id = None
+
+        if not analysis_id:
+            return {
+                "status": "unavailable",
+                "value": "VirusTotal analysis ID not received",
+                "safe": False,
+                "risk_points": 0,
+            }
+
+        # VirusTotal analysis is asynchronous, so poll for completion.
+        analysis = None
+
+        for _ in range(10):
+            analysis_response = requests.get(
+                f"https://www.virustotal.com/api/v3/analyses/{analysis_id}",
+                headers=headers,
+                timeout=15,
+            )
+
+            if analysis_response.status_code != 200:
+                try:
+                    error_data = analysis_response.json()
+                    error_message = (
+                        error_data.get("error", {}).get("message")
+                        or error_data.get("error", {}).get("code")
+                        or analysis_response.text[:300]
+                    )
+                except ValueError:
+                    error_message = analysis_response.text[:300]
+
+                return {
+                    "status": "unavailable",
+                    "value": (
+                        f"VirusTotal result HTTP "
+                        f"{analysis_response.status_code}: "
+                        f"{error_message}"
+                    ),
+                    "safe": False,
+                    "risk_points": 0,
+                }
+
+            try:
+                analysis = analysis_response.json()
+            except ValueError:
+                return {
+                    "status": "unavailable",
+                    "value": "VirusTotal returned an invalid response",
+                    "safe": False,
+                    "risk_points": 0,
+                }
+
+            status = (
+                analysis.get("data", {})
+                .get("attributes", {})
+                .get("status")
+            )
+
+            if status == "completed":
+                break
+
+            time.sleep(2)
+
+        final_status = (
+            analysis.get("data", {})
+            .get("attributes", {})
+            .get("status")
+            if analysis else None
+        )
+
+        if final_status != "completed":
+            return {
+                "status": "pending",
+                "value": (
+                    "VirusTotal analysis is still processing. "
+                    "Please scan again in a few seconds."
+                ),
+                "safe": True,
+                "risk_points": 0,
+            }
+
+        stats = (
+            analysis.get("data", {})
+            .get("attributes", {})
+            .get("stats", {})
+        )
+
+        malicious = int(stats.get("malicious", 0))
+        suspicious = int(stats.get("suspicious", 0))
+        harmless = int(stats.get("harmless", 0))
+        undetected = int(stats.get("undetected", 0))
+        timeout = int(stats.get("timeout", 0))
+
+        total = malicious + suspicious + harmless + undetected + timeout
+
+        if malicious > 0:
+            return {
+                "status": "malicious",
+                "value": (
+                    f"{malicious}/{total} security engines "
+                    "flagged this URL as malicious"
+                ),
+                "safe": False,
+                "risk_points": min(70, malicious * 10),
+                "malicious": malicious,
+                "suspicious": suspicious,
+                "harmless": harmless,
+                "undetected": undetected,
+                "timeout": timeout,
+                "total": total,
+            }
+
+        if suspicious > 0:
+            return {
+                "status": "suspicious",
+                "value": (
+                    f"{suspicious}/{total} security engines "
+                    "flagged this URL as suspicious"
+                ),
+                "safe": False,
+                "risk_points": min(35, suspicious * 7),
+                "malicious": malicious,
+                "suspicious": suspicious,
+                "harmless": harmless,
+                "undetected": undetected,
+                "timeout": timeout,
+                "total": total,
+            }
+
+        return {
+            "status": "clean",
+            "value": f"No malicious detections ({total} engines checked)",
+            "safe": True,
+            "risk_points": 0,
+            "malicious": malicious,
+            "suspicious": suspicious,
+            "harmless": harmless,
+            "undetected": undetected,
+            "timeout": timeout,
+            "total": total,
+        }
+
+    except requests.Timeout:
+        return {
+            "status": "timeout",
+            "value": "VirusTotal check timed out",
+            "safe": False,
+            "risk_points": 0,
+        }
+
+    except requests.RequestException as exc:
+        return {
+            "status": "unavailable",
+            "value": f"VirusTotal service unavailable: {str(exc)[:200]}",
+            "safe": False,
+            "risk_points": 0,
+        }
+
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "value": f"VirusTotal analysis failed: {str(exc)[:200]}",
             "safe": False,
             "risk_points": 0,
         }
@@ -666,6 +1053,56 @@ def scan_url(request: URLScanRequest):
             "safe": False,
         })
 
+        # =========================================================
+    # 15. VIRUSTOTAL REPUTATION
+    # =========================================================
+
+    virustotal = check_virustotal(normalized_url)
+
+    if virustotal["status"] == "malicious":
+        indicators.append({
+            "label": "VirusTotal",
+            "value": virustotal["value"],
+            "safe": False,
+        })
+        risk_points += virustotal["risk_points"]
+
+    elif virustotal["status"] == "suspicious":
+        indicators.append({
+            "label": "VirusTotal",
+            "value": virustotal["value"],
+            "safe": False,
+        })
+        risk_points += virustotal["risk_points"]
+
+    elif virustotal["status"] == "clean":
+        indicators.append({
+            "label": "VirusTotal",
+            "value": virustotal["value"],
+            "safe": True,
+        })
+
+    elif virustotal["status"] == "not_configured":
+        indicators.append({
+            "label": "VirusTotal",
+            "value": "Not configured",
+            "safe": True,
+        })
+
+    elif virustotal["status"] == "pending":
+        indicators.append({
+            "label": "VirusTotal",
+            "value": virustotal["value"],
+            "safe": True,
+        })
+
+    else:
+        indicators.append({
+            "label": "VirusTotal",
+            "value": virustotal["value"],
+            "safe": False,
+        })
+
     # =========================================================
     # FINAL SCORE
     # =========================================================
@@ -707,7 +1144,7 @@ def scan_url(request: URLScanRequest):
     # RESPONSE
     # =========================================================
 
-    return {
+    scan_result = {
         "success": True,
         "url": normalized_url,
         "domain": hostname,
@@ -716,7 +1153,12 @@ def scan_url(request: URLScanRequest):
         "risk_level": risk_level,
         "summary": summary,
         "indicators": indicators,
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    save_scan_history(scan_result)
+
+    return scan_result
 
 
 # =========================================================

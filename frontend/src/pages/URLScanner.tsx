@@ -1,4 +1,5 @@
-import { useState } from 'react'
+
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   AlertTriangle,
@@ -24,6 +25,13 @@ type ScanResult = {
   risk_level: string
   summary: string
   indicators: Indicator[]
+  scanned_at?: string
+}
+
+type HistoryItem = ScanResult & {
+  id: number
+  url: string
+  domain: string
 }
 
 function URLScanner() {
@@ -31,6 +39,98 @@ function URLScanner() {
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState<ScanResult | null>(null)
+  const [history, setHistory] = useState<HistoryItem[]>([])
+  const [historyLoading, setHistoryLoading] = useState(true)
+  const [historyError, setHistoryError] = useState('')
+
+  const loadHistory = async () => {
+    try {
+      setHistoryError('')
+      const response = await fetch('http://127.0.0.1:8000/api/scan/history')
+
+      let data: {
+        success?: boolean
+        history?: HistoryItem[]
+        error?: string
+      }
+
+      try {
+        data = await response.json()
+      } catch {
+        throw new Error(
+          `History request failed (HTTP ${response.status}).`,
+        )
+      }
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Unable to load scan history.')
+      }
+
+      setHistory(data.history ?? [])
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to load scan history.',
+      )
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadHistory()
+  }, [])
+
+  const clearHistory = async () => {
+    if (history.length === 0) return
+
+    const confirmed = window.confirm(
+      'Are you sure you want to clear all scan history?',
+    )
+
+    if (!confirmed) return
+
+    try {
+      setHistoryError('')
+      const response = await fetch(
+        'http://127.0.0.1:8000/api/scan/history',
+        { method: 'DELETE' },
+      )
+
+      let data: { success?: boolean; error?: string }
+
+      try {
+        data = await response.json()
+      } catch {
+        throw new Error(
+          `Clear history failed (HTTP ${response.status}).`,
+        )
+      }
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Unable to clear scan history.')
+      }
+
+      setHistory([])
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to clear scan history.',
+      )
+    }
+  }
+
+  const formatScanTime = (value: string) => {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return value
+
+    return date.toLocaleString([], {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })
+  }
 
   const analyzeUrl = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -75,7 +175,10 @@ function URLScanner() {
         risk_level: data.risk_level,
         summary: data.summary,
         indicators: data.indicators,
+        scanned_at: data.scanned_at,
       })
+
+      void loadHistory()
     } catch (err) {
       setError(
         err instanceof Error
@@ -397,6 +500,108 @@ function URLScanner() {
             </div>
           </div>
         )}
+
+        {/* Scan History */}
+        <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-widest text-cyan-400">
+                Security Archive
+              </p>
+              <h2 className="mt-1 text-lg font-bold text-white">
+                Recent Scan History
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Your latest 20 URL security assessments are stored locally.
+              </p>
+            </div>
+
+            {history.length > 0 && (
+              <button
+                type="button"
+                onClick={clearHistory}
+                className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-2 text-xs font-semibold text-red-400 transition hover:bg-red-500/10"
+              >
+                Clear History
+              </button>
+            )}
+          </div>
+
+          {historyError && (
+            <div className="mb-4 rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+              {historyError}
+            </div>
+          )}
+
+          {historyLoading ? (
+            <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-5 text-sm text-slate-500">
+              <Loader2 size={17} className="animate-spin text-cyan-400" />
+              Loading scan history...
+            </div>
+          ) : history.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-800 bg-slate-950/40 p-7 text-center">
+              <ScanSearch size={26} className="mx-auto mb-3 text-slate-700" />
+              <p className="text-sm font-medium text-slate-400">
+                No scans yet
+              </p>
+              <p className="mt-1 text-xs text-slate-600">
+                Completed URL scans will appear here automatically.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {history.map((item) => {
+                const statusClass =
+                  item.status === 'threat'
+                    ? 'border-red-500/20 bg-red-500/5 text-red-400'
+                    : item.status === 'suspicious'
+                      ? 'border-yellow-500/20 bg-yellow-500/5 text-yellow-400'
+                      : 'border-emerald-500/20 bg-emerald-500/5 text-emerald-400'
+
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      setUrl(item.url)
+                      setResult({
+                        score: item.score,
+                        status: item.status,
+                        risk_level: item.risk_level,
+                        summary: item.summary,
+                        indicators: item.indicators,
+                        scanned_at: item.scanned_at,
+                      })
+                      setError('')
+                      window.scrollTo({ top: 0, behavior: 'smooth' })
+                    }}
+                    className="w-full rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-left transition hover:border-cyan-500/30 hover:bg-slate-950"
+                  >
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-mono text-sm text-cyan-400">
+                          {item.url}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          {formatScanTime(item.scanned_at ?? '')}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <span className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${statusClass}`}>
+                          {item.risk_level} Risk
+                        </span>
+                        <span className="text-lg font-black text-white">
+                          {item.score}
+                        </span>
+                      </div>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
 
         {/* Empty State */}
         {!result && !scanning && !error && (
